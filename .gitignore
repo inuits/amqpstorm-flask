@@ -3,3 +3,5 @@ env/
 venv/
 tests/
 build/
+dist/
+amqpstorm_flask.egg-info/

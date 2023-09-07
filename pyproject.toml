@@ -19,7 +19,6 @@ classifiers = [
 ]
 keywords = ["amqpstorm_flask", "amqpstorm-flask"]
 dependencies = [
-  "pamqp>=2.3.*",
   "AMQPStorm>=2.10.*",
   "Flask>=2.3.*",
   "retry>=0.9.*",

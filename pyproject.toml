@@ -1,7 +1,7 @@
 # pyproject.toml
 
 [build-system]
-requires      = ["setuptools>=59.6", "wheel"]
+requires      = ["setuptools>=59.6.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -19,11 +19,10 @@ classifiers = [
 ]
 keywords = ["amqpstorm_flask", "amqpstorm-flask"]
 dependencies = [
-  "AMQPStorm>=2.10.*",
-  "Flask>=2.3.*",
-  "retry>=0.9.*",
+  "AMQPStorm>=2.10",
+  "Flask>=2.3",
+  "retry>=0.9",
 ]
-
 
 [project.urls]
 Homepage = "https://github.com/inuits/amqpstorm-flask"

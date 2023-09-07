@@ -24,7 +24,6 @@
 To install the required dependencies, run:
 
 ```bash
-pip install Flask amqpstorm retry
 pip install amqpstorm-flask
 ```
 

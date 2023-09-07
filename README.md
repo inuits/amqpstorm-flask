@@ -1,9 +1,7 @@
 
 # AMQP Service for Flask Apps
 
-## Introduction
 
-This repository contains an `AmqpService` class that provides functionality for integrating AMQP (Advanced Message Queuing Protocol) with a Flask application. It uses the `amqpstorm` library to interact with RabbitMQ (or other AMQP 0.9.1 compatible message broker) and provide message queuing services.
 
 ## Features
 
@@ -27,6 +25,7 @@ To install the required dependencies, run:
 
 ```bash
 pip install Flask amqpstorm retry
+pip install amqpstorm-flask
 ```
 
 ## Usage

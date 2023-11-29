@@ -31,9 +31,9 @@ class AmqpService:
     def _validate_channel_connection(self, retry_delay=5, max_retries=20):
         retries = 0
         while (retries <= max_retries) and (
-                not self.connection
-                or self.get_connection().is_closed
-                or self.channel.is_closed
+            not self.connection
+            or self.get_connection().is_closed
+            or self.channel.is_closed
         ):
             try:
                 self.connection = UriConnection(self.mq_url)
@@ -50,17 +50,17 @@ class AmqpService:
                 time.sleep(retry_delay)
 
     def send(
-            self,
-            body,
-            routing_key: str,
-            exchange_type,
-            retries: int = 5,
-            message_version: str = "v1.0.0",
-            passive_exchange: bool = True,
-            durable_exchange: bool = True,
-            debug_exchange: bool = False,
-            auto_delete_exchange: bool = False,
-            **properties,
+        self,
+        body,
+        routing_key: str,
+        exchange_type,
+        retries: int = 5,
+        message_version: str = "v1.0.0",
+        passive_exchange: bool = True,
+        durable_exchange: bool = True,
+        debug_exchange: bool = False,
+        auto_delete_exchange: bool = False,
+        **properties,
     ):
         filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
         exchange_name = (
@@ -88,12 +88,12 @@ class AmqpService:
         )
 
     def _publish_to_channel(
-            self,
-            body,
-            routing_key: str,
-            message_version: str,
-            debug_exchange: bool = False,
-            **properties,
+        self,
+        body,
+        routing_key: str,
+        message_version: str,
+        debug_exchange: bool = False,
+        **properties,
     ):
         if "message_id" not in properties:
             properties["message_id"] = sha256(
@@ -120,21 +120,21 @@ class AmqpService:
         )
 
     def queue_consumer(
-            self,
-            queue_name,
-            routing_key="",
-            max_retries=5,
-            retry_delay=5,
-            exchange_type="topic",
-            durable_exchange=True,
-            passive_exchange=True,
-            durable_queue=True,
-            passive_queue=False,
-            no_ack=True,
-            exchange_name=None,
-            auto_delete_exchange=False,
-            auto_delete_queue=False,
-            queue_arguments=None
+        self,
+        queue_name,
+        routing_key="",
+        max_retries=5,
+        retry_delay=5,
+        exchange_type="topic",
+        durable_exchange=True,
+        passive_exchange=True,
+        durable_queue=True,
+        passive_queue=False,
+        no_ack=True,
+        exchange_name=None,
+        auto_delete_exchange=False,
+        auto_delete_queue=False,
+        queue_arguments=None,
     ):
         if queue_arguments is None:
             queue_arguments = {"x-queue-type": "quorum"}
@@ -158,7 +158,7 @@ class AmqpService:
                             durable=durable_queue,
                             passive=passive_queue,
                             auto_delete=auto_delete_queue,
-                            arguments=queue_arguments
+                            arguments=queue_arguments,
                         )
                         self.channel.basic.qos(prefetch_count=1)
                         self.channel.basic.consume(f, queue=queue_name, no_ack=no_ack)
@@ -187,3 +187,11 @@ class AmqpService:
             return f
 
         return decorator
+
+    def amqp_available(self):
+        return True, self.get_connection().is_open
+
+    def amqp_channel_has_consumers(self):
+        if not len(self.channel.consumer_tags) > 0:
+            raise Exception("No consumers available")
+        return True, f"Consumer count: {len(self.channel.consumer_tags)}"

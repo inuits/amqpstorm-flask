@@ -228,10 +228,9 @@ class RabbitMQ:
 
         return decorator
 
-    def amqp_available(self):
-        return True, self.get_connection().is_open
-
-    def amqp_channel_has_consumers(self):
-        if not len(self.channel.consumer_tags) > 0:
+    def check_health(self, check_consumers=True):
+        if not self.get_connection().is_open:
+            raise Exception("Connection not open")
+        if check_consumers and len(self.channel.consumer_tags) < 1:
             raise Exception("No consumers available")
-        return True, f"Consumer count: {len(self.channel.consumer_tags)}"
+        return True, "healthy"

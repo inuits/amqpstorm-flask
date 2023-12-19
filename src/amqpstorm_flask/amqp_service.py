@@ -1,29 +1,69 @@
 import json
+import os
 import threading
 import time
-from functools import wraps
-from warnings import filterwarnings
-from datetime import datetime
-from hashlib import sha256
 
 from amqpstorm import UriConnection, AMQPConnectionError
-from flask import Flask
+from datetime import datetime
+from functools import wraps
+from hashlib import sha256
 from retry.api import retry_call
+from warnings import filterwarnings
 
 
-class AmqpService:
-    def __init__(self):
-        self.connection = None
+class RabbitMQ:
+    def __init__(
+        self,
+        app=None,
+        queue_prefix="",
+        body_parser=None,
+        msg_parser=None,
+        queue_params=None,
+        development=None,
+        on_message_error_callback=None,
+        middlewares=None,
+        exchange_params=None,
+        *,
+        default_send_properties=None,
+    ):
+        self.app = None
+        self.config = None
         self.exchange_name = None
-        self.channel = None
         self.mq_url = None
         self.logger = None
+        if app is not None:
+            self.init_app(
+                app,
+                queue_prefix,
+                body_parser,
+                msg_parser,
+                development,
+                on_message_error_callback,
+            )
+        self.connection = None
+        self.channel = None
 
-    def init_app(self, app: Flask):
-        self.mq_url = app.config["MQ_URL"]
+    def init_app(
+        self,
+        app=None,
+        queue_prefix="",
+        body_parser=None,
+        msg_parser=None,
+        development=None,
+        on_message_error_callback=None,
+    ):
+        self.app = app
+        self.config = app.config
+        exchange_name = self.config.get("MQ_EXCHANGE") or os.getenv("MQ_EXCHANGE")
+        assert (
+            exchange_name
+        ), "MQ_EXCHANGE not set. Please define a default exchange name."
+        self.exchange_name = exchange_name
+        mq_url = self.config.get("MQ_URL") or os.getenv("MQ_URL")
+        assert mq_url, "MQ_URL not set. Please define a RabbitMQ url"
+        self.mq_url = mq_url
         self.logger = app.logger
         self._validate_channel_connection()
-        self.exchange_name = app.config["MQ_EXCHANGE"]
 
     def get_connection(self):
         return self.connection

@@ -61,7 +61,7 @@ amqp_service.send(
 To consume messages from a specified queue:
 
 ```python
-@amqp_service.queue_consumer(
+@amqp_service.queue(
     queue_name="test_queue",
     routing_key="route.key",
 )

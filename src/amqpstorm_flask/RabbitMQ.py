@@ -185,7 +185,7 @@ class RabbitMQ:
                             exchange_type=exchange_type,
                             durable=self.exchange_params.durable,
                             passive=self.exchange_params.passive,
-                            auto_delete=self.exchange_params.auto_remove,
+                            auto_delete=self.exchange_params.auto_delete,
                         )
                         self.channel.queue.declare(
                             queue=queue_name,

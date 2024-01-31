@@ -2,12 +2,13 @@ import json
 import os
 import threading
 
+from .exchange_params import ExchangeParams
+from .queue_params import QueueParams
+
 from amqpstorm import UriConnection, AMQPConnectionError
 from datetime import datetime
-from exchange_params import ExchangeParams
 from functools import wraps
 from hashlib import sha256
-from queue_params import QueueParams
 from retry.api import retry_call
 from time import sleep
 from typing import Union, List

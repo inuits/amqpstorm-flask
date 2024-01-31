@@ -57,8 +57,8 @@ class RabbitMQ:
         on_message_error_callback=None,
         middlewares=None,
     ):
-        self.mq_url = app.config["MQ_URL"]
-        self.mq_exchange = app.config["MQ_EXCHANGE"]
+        self.mq_url = app.config.get("MQ_URL") or os.getenv("MQ_URL")
+        self.mq_exchange = app.config.get("MQ_EXCHANGE") or os.getenv("MQ_EXCHANGE")
         self.logger = app.logger
         self.body_parser = body_parser
         self.msg_parser = msg_parser

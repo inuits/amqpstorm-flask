@@ -221,9 +221,7 @@ class RabbitMQ:
                         if retries > max_retries:
                             exit(0)
 
-                        self.logger.warning(
-                            f"An error occurred while consuming the queue {queue_name}: {str(ex)}"
-                        )
+                        self.logger.exception(ex)
                         self.logger.warning(f"Retrying in {retry_delay} seconds...")
                         sleep(retry_delay)
 

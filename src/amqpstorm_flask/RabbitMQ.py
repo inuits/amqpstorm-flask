@@ -161,7 +161,7 @@ class RabbitMQ:
         def wrapper_function(message):
             f(
                 routing_key=routing_key,
-                body=message.body,
+                body=message.json(),
                 message_id=message.message_id,
             )
 
@@ -221,7 +221,11 @@ class RabbitMQ:
                         if retries > max_retries:
                             exit(0)
 
-                        self.logger.exception(ex)
+                        self.logger.exception(
+                            "An error occurred while consuming queue %s: %s",
+                            queue_name,
+                            ex,
+                        )
                         self.logger.warning(f"Retrying in {retry_delay} seconds...")
                         sleep(retry_delay)
 

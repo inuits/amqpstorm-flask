@@ -196,7 +196,13 @@ class RabbitMQ:
                         )
                         self.channel.basic.qos(prefetch_count=1)
                         self.channel.basic.consume(
-                            f, queue=queue_name, no_ack=self.queue_params.no_ack
+                            lambda message, consumer_tag, channel, body, envelope, properties: f(
+                                routing_key=envelope.routing_key,
+                                body=body,
+                                message_id=properties.message_id
+                            ),
+                            queue=queue_name,
+                            no_ack=self.queue_params.no_ack
                         )
                         self.channel.queue.bind(
                             queue=queue_name,

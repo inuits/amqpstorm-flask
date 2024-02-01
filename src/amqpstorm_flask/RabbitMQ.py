@@ -157,14 +157,12 @@ class RabbitMQ:
             properties=properties,
         )
 
-    def __create_wrapper_function(self, f):
-        def wrapper_function(
-            message, consumer_tag, channel, body, envelope, properties
-        ):
+    def __create_wrapper_function(self, routing_key, f):
+        def wrapper_function(message):
             f(
-                routing_key=envelope.routing_key,
-                body=body,
-                message_id=properties.message_id,
+                routing_key=routing_key,
+                body=message.body,
+                message_id=message.message_id,
             )
 
         return wrapper_function
@@ -207,7 +205,7 @@ class RabbitMQ:
                             arguments=queue_arguments,
                         )
                         self.channel.basic.qos(prefetch_count=1)
-                        wrapped_f = self.__create_wrapper_function(f)
+                        wrapped_f = self.__create_wrapper_function(routing_key, f)
                         self.channel.basic.consume(
                             wrapped_f, queue=queue_name, no_ack=self.queue_params.no_ack
                         )

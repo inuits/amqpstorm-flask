@@ -7,6 +7,7 @@ from .queue_params import QueueParams
 
 from amqpstorm import UriConnection, AMQPConnectionError
 from datetime import datetime
+from elody.util import CustomJSONEncoder
 from functools import wraps
 from hashlib import sha256
 from retry.api import retry_call
@@ -135,9 +136,10 @@ class RabbitMQ:
         debug_exchange: bool = False,
         **properties,
     ):
+        encoded_body = json.dumps(body, cls=CustomJSONEncoder).encode("utf-8")
         if "message_id" not in properties:
             properties["message_id"] = sha256(
-                json.dumps(body).encode("utf-8")
+                encoded_body
             ).hexdigest()
         if "timestamp" not in properties:
             properties["timestamp"] = int(datetime.now().timestamp())
@@ -153,7 +155,7 @@ class RabbitMQ:
         self.channel.basic.publish(
             exchange=exchange_name,
             routing_key=routing_key,
-            body=bytes(json.dumps(body), "utf-8"),
+            body=encoded_body,
             properties=properties,
         )
 

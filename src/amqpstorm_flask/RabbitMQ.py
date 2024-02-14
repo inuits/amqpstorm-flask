@@ -6,7 +6,6 @@ from .exchange_params import ExchangeParams
 from .queue_params import QueueParams
 
 from amqpstorm import UriConnection, AMQPConnectionError
-from custom_json_encoder import CustomJSONEncoder
 from datetime import datetime
 from functools import wraps
 from hashlib import sha256
@@ -46,6 +45,7 @@ class RabbitMQ:
             )
         self.connection = None
         self.channel = None
+        self.json_encoder = None
         self.development = development if development is not None else False
 
     def init_app(
@@ -57,12 +57,14 @@ class RabbitMQ:
         development=None,
         on_message_error_callback=None,
         middlewares=None,
+        json_encoder=None
     ):
         self.mq_url = app.config.get("MQ_URL") or os.getenv("MQ_URL")
         self.mq_exchange = app.config.get("MQ_EXCHANGE") or os.getenv("MQ_EXCHANGE")
         self.logger = app.logger
         self.body_parser = body_parser
         self.msg_parser = msg_parser
+        self.json_encoder = json_encoder
         self._validate_channel_connection()
 
     def check_health(self, check_consumers=True):
@@ -136,7 +138,7 @@ class RabbitMQ:
         debug_exchange: bool = False,
         **properties,
     ):
-        encoded_body = json.dumps(body, cls=CustomJSONEncoder).encode("utf-8")
+        encoded_body = json.dumps(body, cls=self.json_encoder).encode("utf-8")
         if "message_id" not in properties:
             properties["message_id"] = sha256(encoded_body).hexdigest()
         if "timestamp" not in properties:

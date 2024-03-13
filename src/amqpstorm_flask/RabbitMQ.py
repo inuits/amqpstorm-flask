@@ -1,6 +1,6 @@
 import json
-import os
 import threading
+from os import getenv
 
 from .exchange_params import ExchangeParams
 from .queue_params import QueueParams
@@ -59,8 +59,8 @@ class RabbitMQ:
         middlewares=None,
         json_encoder=None
     ):
-        self.mq_url = app.config.get("MQ_URL") or os.getenv("MQ_URL")
-        self.mq_exchange = app.config.get("MQ_EXCHANGE") or os.getenv("MQ_EXCHANGE")
+        self.mq_url = app.config.get("MQ_URL") or getenv("MQ_URL")
+        self.mq_exchange = app.config.get("MQ_EXCHANGE") or getenv("MQ_EXCHANGE")
         self.logger = app.logger
         self.body_parser = body_parser
         self.msg_parser = msg_parser
@@ -69,15 +69,18 @@ class RabbitMQ:
 
     def check_health(self, check_consumers=True):
         if not self.get_connection().is_open:
-            raise Exception("Connection not open")
+            # try to recover connection before failing the health check
+            self._validate_channel_connection(0.1)
+            if not self.get_connection().is_open:
+                return False, "Connection not open"
         if check_consumers and len(self.channel.consumer_tags) < 1:
-            raise Exception("No consumers available")
-        return True, "healthy"
+            return False, "No consumers available"
+        return True, "Connection open"
 
     def get_connection(self):
         return self.connection
 
-    def _validate_channel_connection(self, retry_delay=5, max_retries=20):
+    def _validate_channel_connection(self, retry_delay=5.0, max_retries=20):
         retries = 0
         while (retries <= max_retries) and (
             not self.connection
@@ -105,15 +108,16 @@ class RabbitMQ:
         exchange_type: str = "topic",
         retries: int = 5,
         message_version: str = "v1.0.0",
+        debug_exchange: bool = False,
         **properties,
     ):
         filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
         exchange_name = (
-            f"{self.mq_exchange}-debug" if self.development else self.mq_exchange
+            f"{self.mq_exchange}-development" if self.development else self.mq_exchange
         )
         self._validate_channel_connection()
         self.channel.exchange.declare(
-            exchange=exchange_name,
+            exchange=f"{exchange_name}-debug" if debug_exchange else exchange_name,
             exchange_type=exchange_type,
             passive=self.exchange_params.passive,
             durable=self.exchange_params.durable,
@@ -122,7 +126,7 @@ class RabbitMQ:
 
         retry_call(
             self._publish_to_channel,
-            (body, routing_key, message_version, self.development),
+            (body, routing_key, message_version, debug_exchange),
             properties,
             exceptions=(AMQPConnectionError, AssertionError),
             tries=retries,
@@ -149,17 +153,19 @@ class RabbitMQ:
         properties["headers"]["x-message-version"] = message_version
         filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
         exchange_name = (
-            f"{self.mq_exchange}-debug" if debug_exchange is True else self.mq_exchange
+            f"{self.mq_exchange}-development" if self.development else self.mq_exchange
         )
+
         self._validate_channel_connection()
         self.channel.basic.publish(
-            exchange=exchange_name,
+            exchange=f"{exchange_name}-debug" if debug_exchange is True else exchange_name,
             routing_key=routing_key,
             body=encoded_body,
             properties=properties,
         )
 
-    def __create_wrapper_function(self, routing_key, f):
+    @staticmethod
+    def __create_wrapper_function(routing_key, f):
         def wrapper_function(message):
             f(
                 routing_key=routing_key,
@@ -180,6 +186,9 @@ class RabbitMQ:
         max_retries: int = 5,
         retry_delay: int = 5,
         queue_arguments: dict = None,
+        prefetch_count: int = 1,
+        queue_name: str = None,
+        full_message_object: bool = False
     ):
         if queue_arguments is None:
             queue_arguments = {"x-queue-type": "quorum"}
@@ -187,7 +196,7 @@ class RabbitMQ:
         def decorator(f):
             @wraps(f)
             def new_consumer():
-                queue_name = f.__name__.replace("_", os.getenv("MQ_DELIMITER", "."))
+                queue = f.__name__.replace("_", getenv("MQ_DELIMITER", ".")) if queue_name is None else queue_name
                 retries = 0
                 while retries <= max_retries:
                     try:
@@ -200,23 +209,23 @@ class RabbitMQ:
                             auto_delete=self.exchange_params.auto_delete,
                         )
                         self.channel.queue.declare(
-                            queue=queue_name,
+                            queue=queue,
                             durable=self.queue_params.durable,
                             passive=self.queue_params.passive,
                             auto_delete=self.queue_params.auto_delete,
                             arguments=queue_arguments,
                         )
-                        self.channel.basic.qos(prefetch_count=1)
-                        wrapped_f = self.__create_wrapper_function(routing_key, f)
+                        self.channel.basic.qos(prefetch_count=prefetch_count)
+                        cb_function = f if full_message_object else self.__create_wrapper_function(routing_key, f)
                         self.channel.basic.consume(
-                            wrapped_f, queue=queue_name, no_ack=self.queue_params.no_ack
+                            cb_function, queue=queue, no_ack=self.queue_params.no_ack if auto_ack is False else auto_ack
                         )
                         self.channel.queue.bind(
-                            queue=queue_name,
+                            queue=queue,
                             exchange=self.mq_exchange,
                             routing_key=routing_key,
                         )
-                        self.logger.info(f"Start consuming queue {queue_name}")
+                        self.logger.info(f"Start consuming queue {queue}")
                         self.channel.start_consuming()
                     except Exception as ex:
                         retries += 1
@@ -225,7 +234,7 @@ class RabbitMQ:
 
                         self.logger.exception(
                             "An error occurred while consuming queue %s: %s",
-                            queue_name,
+                            queue,
                             ex,
                         )
                         self.logger.warning(f"Retrying in {retry_delay} seconds...")

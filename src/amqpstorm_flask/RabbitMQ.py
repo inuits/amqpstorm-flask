@@ -179,7 +179,7 @@ class RabbitMQ:
         self,
         routing_key: Union[str, List[str]],
         exchange_type: str = "topic",
-        auto_ack: bool = False,
+        auto_ack: bool = None,
         dead_letter_exchange: bool = False,
         props_needed: List[str] | None = None,
         exchange_name: str = None,
@@ -218,7 +218,7 @@ class RabbitMQ:
                         self.channel.basic.qos(prefetch_count=prefetch_count)
                         cb_function = f if full_message_object else self.__create_wrapper_function(routing_key, f)
                         self.channel.basic.consume(
-                            cb_function, queue=queue, no_ack=self.queue_params.no_ack if auto_ack is False else auto_ack
+                            cb_function, queue=queue, no_ack=self.queue_params.no_ack if auto_ack is None else auto_ack
                         )
                         self.channel.queue.bind(
                             queue=queue,

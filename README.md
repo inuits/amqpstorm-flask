@@ -31,7 +31,7 @@ pip install amqpstorm-flask
 
 ### Initialization
 
-First, create a Flask app and initialize the `AmqpService`.
+First, create a Flask app and initialize the `RabbitMQ`.
 
 ```python
 from flask import Flask
@@ -39,7 +39,7 @@ app = Flask(__name__)
 app.config["MQ_URL"] = "<Your_MQ_URL>"
 app.config["MQ_EXCHANGE"] = "<Your_MQ_Exchange_Name>"
 
-amqp_service = AmqpService()
+amqp_service = RabbitMQ()
 amqp_service.init_app(app)
 ```
 

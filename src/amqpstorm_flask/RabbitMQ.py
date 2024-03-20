@@ -188,7 +188,8 @@ class RabbitMQ:
         queue_arguments: dict = None,
         prefetch_count: int = 1,
         queue_name: str = None,
-        full_message_object: bool = False
+        full_message_object: bool = False,
+        passive_queue: bool = None
     ):
         if queue_arguments is None:
             queue_arguments = {"x-queue-type": "quorum"}
@@ -211,7 +212,7 @@ class RabbitMQ:
                         self.channel.queue.declare(
                             queue=queue,
                             durable=self.queue_params.durable,
-                            passive=self.queue_params.passive,
+                            passive=self.queue_params.passive if passive_queue is None else passive_queue,
                             auto_delete=self.queue_params.auto_delete,
                             arguments=queue_arguments,
                         )

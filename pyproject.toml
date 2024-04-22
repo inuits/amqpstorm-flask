@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amqpstorm-flask"
-version = "0.3.4"
+version = "0.4.0"
 description = "amqpstorm library for Flask"
 readme = "README.md"
 authors = [{ name = "Inuits", email = "developers@inuits.eu" }]

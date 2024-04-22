@@ -198,10 +198,7 @@ class RabbitMQ:
             queue = f.__name__.replace("_", getenv("MQ_DELIMITER", ".")) if queue_name is None else queue_name
 
             enabled_queues = None if getenv("MQ_QUEUES") is None else getenv("MQ_QUEUES").split(",")
-            if enabled_queues is None:
-                all_queues_enabled = True
-            else:
-                all_queues_enabled = False
+            all_queues_enabled = enabled_queues is None
 
             if queue in enabled_queues or all_queues_enabled:
                 @wraps(f)

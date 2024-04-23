@@ -223,13 +223,17 @@ class RabbitMQ:
                             self.channel.basic.qos(prefetch_count=prefetch_count)
                             cb_function = f if full_message_object else self.__create_wrapper_function(routing_key, f)
                             self.channel.basic.consume(
-                                cb_function, queue=queue, no_ack=self.queue_params.no_ack if auto_ack is None else auto_ack
+                                cb_function, queue=queue,
+                                no_ack=self.queue_params.no_ack if auto_ack is None else auto_ack
                             )
-                            self.channel.queue.bind(
-                                queue=queue,
-                                exchange=self.mq_exchange,
-                                routing_key=routing_key,
-                            )
+
+                            keys = [routing_key] if isinstance(routing_key, str) else routing_key
+                            for key in keys:
+                                self.channel.queue.bind(
+                                    queue=queue,
+                                    exchange=self.mq_exchange,
+                                    routing_key=key,
+                                )
                             self.logger.info(f"Start consuming queue {queue}")
                             self.channel.start_consuming()
                         except Exception as ex:

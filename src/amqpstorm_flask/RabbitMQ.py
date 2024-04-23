@@ -198,9 +198,8 @@ class RabbitMQ:
             queue = f.__name__.replace("_", getenv("MQ_DELIMITER", ".")) if queue_name is None else queue_name
 
             enabled_queues = None if getenv("MQ_QUEUES") is None else getenv("MQ_QUEUES").split(",")
-            all_queues_enabled = enabled_queues is None
 
-            if queue in enabled_queues or all_queues_enabled:
+            if enabled_queues is None or queue in enabled_queues:
                 @wraps(f)
                 def new_consumer():
                     retries = 0

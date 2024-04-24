@@ -69,10 +69,7 @@ class RabbitMQ:
 
     def check_health(self, check_consumers=True):
         if not self.get_connection().is_open:
-            # try to recover connection before failing the health check
-            self._validate_channel_connection(0.1)
-            if not self.get_connection().is_open:
-                return False, "Connection not open"
+            return False, "Connection not open"
         if check_consumers and len(self.channel.consumer_tags) < 1:
             return False, "No consumers available"
         return True, "Connection open"

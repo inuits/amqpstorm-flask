@@ -29,10 +29,13 @@ class RabbitMQ:
         exchange_params=None,
         *,
         default_send_properties=None,
+        mq_url=None,
+        mq_exchange=None,
+        logger=None
     ):
-        self.mq_url = None
-        self.mq_exchange = None
-        self.logger = None
+        self.mq_url = mq_url
+        self.mq_exchange = mq_exchange
+        self.logger = logger
         self.body_parser = body_parser
         self.msg_parser = msg_parser
         self.exchange_params = exchange_params or ExchangeParams()
@@ -106,15 +109,17 @@ class RabbitMQ:
         retries: int = 5,
         message_version: str = "v1.0.0",
         debug_exchange: bool = False,
+        exchange_name: str = None,
         **properties,
     ):
         filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
-        exchange_name = (
-            f"{self.mq_exchange}-development" if self.development else self.mq_exchange
+        exchange_name = self.mq_exchange if exchange_name is None else exchange_name
+        exchange = (
+            f"{exchange_name}-development" if self.development else exchange_name
         )
         self._validate_channel_connection()
         self.channel.exchange.declare(
-            exchange=f"{exchange_name}-debug" if debug_exchange else exchange_name,
+            exchange=f"{exchange}-debug" if debug_exchange else exchange,
             exchange_type=exchange_type,
             passive=self.exchange_params.passive,
             durable=self.exchange_params.durable,
@@ -123,7 +128,7 @@ class RabbitMQ:
 
         retry_call(
             self._publish_to_channel,
-            (body, routing_key, message_version, debug_exchange),
+            (body, routing_key, message_version, debug_exchange, exchange_name),
             properties,
             exceptions=(AMQPConnectionError, AssertionError),
             tries=retries,
@@ -137,6 +142,7 @@ class RabbitMQ:
         routing_key: str,
         message_version: str,
         debug_exchange: bool = False,
+        exchange_name: str = None,
         **properties,
     ):
         encoded_body = json.dumps(body, cls=self.json_encoder).encode("utf-8")
@@ -149,9 +155,6 @@ class RabbitMQ:
             properties["headers"] = {}
         properties["headers"]["x-message-version"] = message_version
         filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
-        exchange_name = (
-            f"{self.mq_exchange}-development" if self.development else self.mq_exchange
-        )
 
         self._validate_channel_connection()
         self.channel.basic.publish(

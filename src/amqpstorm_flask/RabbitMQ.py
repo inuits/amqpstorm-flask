@@ -207,7 +207,7 @@ class RabbitMQ:
                         try:
                             self._validate_channel_connection()
                             self.channel.exchange.declare(
-                                exchange_name if exchange_name else self.mq_exchange,
+                                exchange=exchange_name if exchange_name else self.mq_exchange,
                                 exchange_type=exchange_type,
                                 durable=self.exchange_params.durable,
                                 passive=self.exchange_params.passive,
@@ -231,7 +231,7 @@ class RabbitMQ:
                             for key in keys:
                                 self.channel.queue.bind(
                                     queue=queue,
-                                    exchange=self.mq_exchange,
+                                    exchange=exchange_name if exchange_name else self.mq_exchange,
                                     routing_key=key,
                                 )
                             self.logger.info(f"Start consuming queue {queue}")

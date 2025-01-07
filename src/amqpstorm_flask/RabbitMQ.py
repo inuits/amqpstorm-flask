@@ -50,6 +50,7 @@ class RabbitMQ:
         self.channel = None
         self.json_encoder = None
         self.development = development if development is not None else False
+        self.last_message_consumed_at = 0
 
     def init_app(
         self,

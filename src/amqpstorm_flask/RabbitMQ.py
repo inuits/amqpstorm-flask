@@ -1,4 +1,6 @@
 import json
+import logging
+import sys
 import threading
 from os import getenv
 
@@ -10,28 +12,29 @@ from datetime import datetime
 from functools import wraps
 from hashlib import sha256
 from retry.api import retry_call
-from time import sleep
+from time import sleep, time
 from typing import Union, List
 from warnings import filterwarnings
+from apscheduler.schedulers.background import BackgroundScheduler
 
 
 class RabbitMQ:
     def __init__(
-        self,
-        app=None,
-        queue_prefix=None,
-        body_parser=None,
-        msg_parser=None,
-        queue_params=None,
-        development=None,
-        on_message_error_callback=None,
-        middlewares=None,
-        exchange_params=None,
-        *,
-        default_send_properties=None,
-        mq_url=None,
-        mq_exchange=None,
-        logger=None
+            self,
+            app=None,
+            queue_prefix=None,
+            body_parser=None,
+            msg_parser=None,
+            queue_params=None,
+            development=None,
+            on_message_error_callback=None,
+            middlewares=None,
+            exchange_params=None,
+            *,
+            default_send_properties=None,
+            mq_url=None,
+            mq_exchange=None,
+            logger=None
     ):
         self.mq_url = mq_url
         self.mq_exchange = mq_exchange
@@ -51,17 +54,18 @@ class RabbitMQ:
         self.json_encoder = None
         self.development = development if development is not None else False
         self.last_message_consumed_at = 0
+        self.scheduler = BackgroundScheduler()
 
     def init_app(
-        self,
-        app,
-        queue_prefix=None,
-        body_parser=None,
-        msg_parser=None,
-        development=None,
-        on_message_error_callback=None,
-        middlewares=None,
-        json_encoder=None
+            self,
+            app,
+            queue_prefix=None,
+            body_parser=None,
+            msg_parser=None,
+            development=None,
+            on_message_error_callback=None,
+            middlewares=None,
+            json_encoder=None
     ):
         self.mq_url = app.config.get("MQ_URL") or getenv("MQ_URL")
         self.mq_exchange = app.config.get("MQ_EXCHANGE") or getenv("MQ_EXCHANGE")
@@ -69,7 +73,25 @@ class RabbitMQ:
         self.body_parser = body_parser
         self.msg_parser = msg_parser
         self.json_encoder = json_encoder
-        self._validate_channel_connection()
+        if int(getenv("FILTER_LOGS", 1)) == 1:
+            # some logs are useless, but we don't want to fully block a log level
+            class LogFilterAPScheduler(logging.Filter):
+                def filter(self, record):
+                    message = record.getMessage()
+                    return "amqp_consumer_job_" not in message and "_validate_channel_connection" not in message
+            logging.getLogger("apscheduler.scheduler").addFilter(LogFilterAPScheduler())
+            logging.getLogger("apscheduler.executors.default").addFilter(LogFilterAPScheduler())
+            class LogFilterAmqpStorm(logging.Filter):
+                def filter(self, record):
+                    message = record.getMessage()
+                    # this logs a warning but also a stacktrace about connection error, we already have logs for that,
+                    # no need to log it again with a stacktrace
+                    return "Stopping inbound thread due to" not in message
+            logging.getLogger("amqpstorm.io").addFilter(LogFilterAmqpStorm())
+
+        self.scheduler.start()
+        self.scheduler.add_job(self._validate_channel_connection, "interval", seconds=5, max_instances=1)
+
 
     def check_health(self, check_consumers=True):
         if not self.get_connection().is_open:
@@ -81,44 +103,36 @@ class RabbitMQ:
     def get_connection(self):
         return self.connection
 
-    def _validate_channel_connection(self, retry_delay=5.0, max_retries=20):
-        retries = 0
-        while (retries <= max_retries) and (
-            not self.connection
-            or self.get_connection().is_closed
-            or self.channel.is_closed
-        ):
+    def _validate_channel_connection(self):
+        max_consumer_idle_time = int(getenv("MQ_MAX_CONSUMER_IDLE_TIME", 300))
+        consumed_seconds_ago = (time() - self.last_message_consumed_at)
+        if (not self.connection or self.get_connection().is_closed or self.channel.is_closed or
+                self.last_message_consumed_at == -1 or (self.last_message_consumed_at != 0 and (consumed_seconds_ago > max_consumer_idle_time))):
             try:
                 self.connection = UriConnection(self.mq_url)
                 self.channel = self.get_connection().channel()
-            except Exception as ex:
-                retries += 1
-                if retries > max_retries:
-                    exit(0)
-
-                self.logger.warning(
-                    f"An error occurred while connecting to {self.mq_url}: {str(ex)}"
+                self.last_message_consumed_at = 0
+            except BaseException as ex:
+                self.logger.error(
+                    f"An error occurred while renewing rabbit connection: {str(ex)}"
                 )
-                self.logger.warning(f"Reconnecting in {retry_delay} seconds...")
-                sleep(retry_delay)
 
     def send(
-        self,
-        body,
-        routing_key: str,
-        exchange_type: str = "topic",
-        retries: int = 5,
-        message_version: str = "v1.0.0",
-        debug_exchange: bool = False,
-        exchange_name: str = None,
-        **properties,
+            self,
+            body,
+            routing_key: str,
+            exchange_type: str = "topic",
+            retries: int = 5,
+            message_version: str = "v1.0.0",
+            debug_exchange: bool = False,
+            exchange_name: str = None,
+            **properties,
     ):
         filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
         exchange_name = self.mq_exchange if exchange_name is None else exchange_name
         exchange = (
             f"{exchange_name}-development" if self.development else exchange_name
         )
-        self._validate_channel_connection()
         self.channel.exchange.declare(
             exchange=f"{exchange}-debug" if debug_exchange else exchange,
             exchange_type=exchange_type,
@@ -138,13 +152,13 @@ class RabbitMQ:
         )
 
     def _publish_to_channel(
-        self,
-        body,
-        routing_key: str,
-        message_version: str,
-        debug_exchange: bool = False,
-        exchange_name: str = None,
-        **properties,
+            self,
+            body,
+            routing_key: str,
+            message_version: str,
+            debug_exchange: bool = False,
+            exchange_name: str = None,
+            **properties,
     ):
         encoded_body = json.dumps(body, cls=self.json_encoder).encode("utf-8")
         if "message_id" not in properties:
@@ -157,7 +171,6 @@ class RabbitMQ:
         properties["headers"]["x-message-version"] = message_version
         filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
 
-        self._validate_channel_connection()
         self.channel.basic.publish(
             exchange=f"{exchange_name}-debug" if debug_exchange is True else exchange_name,
             routing_key=routing_key,
@@ -177,20 +190,20 @@ class RabbitMQ:
         return wrapper_function
 
     def queue(
-        self,
-        routing_key: Union[str, List[str]],
-        exchange_type: str = "topic",
-        auto_ack: bool = None,
-        dead_letter_exchange: bool = False,
-        props_needed: List[str] | None = None,
-        exchange_name: str = None,
-        max_retries: int = 5,
-        retry_delay: int = 5,
-        queue_arguments: dict = None,
-        prefetch_count: int = 1,
-        queue_name: str = None,
-        full_message_object: bool = False,
-        passive_queue: bool = None
+            self,
+            routing_key: Union[str, List[str]],
+            exchange_type: str = "topic",
+            auto_ack: bool = None,
+            dead_letter_exchange: bool = False,
+            props_needed: List[str] | None = None,
+            exchange_name: str = None,
+            max_retries: int = 5,
+            retry_delay: int = 5,
+            queue_arguments: dict = None,
+            prefetch_count: int = 1,
+            queue_name: str = None,
+            full_message_object: bool = False,
+            passive_queue: bool = None
     ):
         if queue_arguments is None:
             queue_arguments = {"x-queue-type": "quorum"}
@@ -203,57 +216,48 @@ class RabbitMQ:
             if enabled_queues is None or queue in enabled_queues:
                 @wraps(f)
                 def new_consumer():
-                    retries = 0
-                    while retries <= max_retries:
-                        try:
-                            self._validate_channel_connection()
-                            self.channel.exchange.declare(
-                                exchange=exchange_name if exchange_name else self.mq_exchange,
-                                exchange_type=exchange_type,
-                                durable=self.exchange_params.durable,
-                                passive=self.exchange_params.passive,
-                                auto_delete=self.exchange_params.auto_delete,
-                            )
-                            self.channel.queue.declare(
+                    try:
+                        self._validate_channel_connection()
+                        self.channel.exchange.declare(
+                            exchange=exchange_name if exchange_name else self.mq_exchange,
+                            exchange_type=exchange_type,
+                            durable=self.exchange_params.durable,
+                            passive=self.exchange_params.passive,
+                            auto_delete=self.exchange_params.auto_delete,
+                        )
+                        self.channel.queue.declare(
+                            queue=queue,
+                            durable=self.queue_params.durable,
+                            passive=self.queue_params.passive if passive_queue is None else passive_queue,
+                            auto_delete=self.queue_params.auto_delete,
+                            arguments=queue_arguments,
+                        )
+                        self.channel.basic.qos(prefetch_count=prefetch_count)
+                        cb_function = f if full_message_object else self.__create_wrapper_function(routing_key, f)
+                        self.channel.basic.consume(
+                            cb_function, queue=queue,
+                            no_ack=self.queue_params.no_ack if auto_ack is None else auto_ack
+                        )
+
+                        keys = [routing_key] if isinstance(routing_key, str) else routing_key
+                        for key in keys:
+                            self.channel.queue.bind(
                                 queue=queue,
-                                durable=self.queue_params.durable,
-                                passive=self.queue_params.passive if passive_queue is None else passive_queue,
-                                auto_delete=self.queue_params.auto_delete,
-                                arguments=queue_arguments,
+                                exchange=exchange_name if exchange_name else self.mq_exchange,
+                                routing_key=key,
                             )
-                            self.channel.basic.qos(prefetch_count=prefetch_count)
-                            cb_function = f if full_message_object else self.__create_wrapper_function(routing_key, f)
-                            self.channel.basic.consume(
-                                cb_function, queue=queue,
-                                no_ack=self.queue_params.no_ack if auto_ack is None else auto_ack
-                            )
+                        self.logger.info(f"Start consuming queue {queue}")
+                        self.channel.start_consuming()
+                    except BaseException as ex:
+                        self.logger.error(
+                            f"An error occurred while consuming queue {queue}: {str(ex)}, apscheduler will try to restart it every 5 seconds"
+                        )
 
-                            keys = [routing_key] if isinstance(routing_key, str) else routing_key
-                            for key in keys:
-                                self.channel.queue.bind(
-                                    queue=queue,
-                                    exchange=exchange_name if exchange_name else self.mq_exchange,
-                                    routing_key=key,
-                                )
-                            self.logger.info(f"Start consuming queue {queue}")
-                            self.channel.start_consuming()
-                        except Exception as ex:
-                            retries += 1
-                            if retries > max_retries:
-                                exit(0)
-
-                            self.logger.exception(
-                                "An error occurred while consuming queue %s: %s",
-                                queue,
-                                ex,
-                            )
-                            self.logger.warning(f"Retrying in {retry_delay} seconds...")
-                            sleep(retry_delay)
-
-                thread = threading.Thread(target=new_consumer)
-                thread.daemon = True
-                thread.start()
+                self.scheduler.add_job(new_consumer, "interval", seconds=5, max_instances=1, name=f"amqp_consumer_job_{f.__name__}")
 
             return f
 
         return decorator
+
+    def stop(self):
+        self.scheduler.shutdown()

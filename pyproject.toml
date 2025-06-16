@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amqpstorm-flask"
-version = "0.4.8"
+version = "0.4.9"
 description = "amqpstorm library for Flask"
 readme = "README.md"
 authors = [{ name = "Inuits", email = "developers@inuits.eu" }]
@@ -22,6 +22,7 @@ dependencies = [
   "AMQPStorm>=2.10",
   "Flask>=2.3",
   "retry>=0.9",
+  "apscheduler>=3.11"
 ]
 
 [project.urls]

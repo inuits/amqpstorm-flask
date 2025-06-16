@@ -90,6 +90,7 @@ class RabbitMQ:
             logging.getLogger("amqpstorm.io").addFilter(LogFilterAmqpStorm())
 
         self.scheduler.start()
+        self._validate_channel_connection()
         self.scheduler.add_job(self._validate_channel_connection, "interval", seconds=5, max_instances=1)
 
 
@@ -133,6 +134,7 @@ class RabbitMQ:
         exchange = (
             f"{exchange_name}-development" if self.development else exchange_name
         )
+        self._validate_channel_connection()
         self.channel.exchange.declare(
             exchange=f"{exchange}-debug" if debug_exchange else exchange,
             exchange_type=exchange_type,
@@ -170,7 +172,7 @@ class RabbitMQ:
             properties["headers"] = {}
         properties["headers"]["x-message-version"] = message_version
         filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
-
+        self._validate_channel_connection()
         self.channel.basic.publish(
             exchange=f"{exchange_name}-debug" if debug_exchange is True else exchange_name,
             routing_key=routing_key,

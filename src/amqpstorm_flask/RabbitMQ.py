@@ -73,25 +73,29 @@ class RabbitMQ:
         self.body_parser = body_parser
         self.msg_parser = msg_parser
         self.json_encoder = json_encoder
-        if int(getenv("FILTER_LOGS", 1)) == 1:
-            # some logs are useless, but we don't want to fully block a log level
-            class LogFilterAPScheduler(logging.Filter):
-                def filter(self, record):
-                    message = record.getMessage()
-                    return "amqp_consumer_job_" not in message and "_validate_channel_connection" not in message
-            logging.getLogger("apscheduler.scheduler").addFilter(LogFilterAPScheduler())
-            logging.getLogger("apscheduler.executors.default").addFilter(LogFilterAPScheduler())
-            class LogFilterAmqpStorm(logging.Filter):
-                def filter(self, record):
-                    message = record.getMessage()
-                    # this logs a warning but also a stacktrace about connection error, we already have logs for that,
-                    # no need to log it again with a stacktrace
-                    return "Stopping inbound thread due to" not in message
-            logging.getLogger("amqpstorm.io").addFilter(LogFilterAmqpStorm())
+        if int(getenv("AMQP_STORM_APSCHEDULER", 1))== 1:
+            if int(getenv("FILTER_LOGS", 1)) == 1:
+                # some logs are useless, but we don't want to fully block a log level
+                class LogFilterAPScheduler(logging.Filter):
+                    def filter(self, record):
+                        message = record.getMessage()
+                        return "amqp_consumer_job_" not in message and "_validate_channel_connection" not in message
+                logging.getLogger("apscheduler.scheduler").addFilter(LogFilterAPScheduler())
+                logging.getLogger("apscheduler.executors.default").addFilter(LogFilterAPScheduler())
+                class LogFilterAmqpStorm(logging.Filter):
+                    def filter(self, record):
+                        message = record.getMessage()
+                        # this logs a warning but also a stacktrace about connection error, we already have logs for that,
+                        # no need to log it again with a stacktrace
+                        return "Stopping inbound thread due to" not in message
+                logging.getLogger("amqpstorm.io").addFilter(LogFilterAmqpStorm())
+            self.scheduler.start()
+            self._validate_channel_connection()
+            self.scheduler.add_job(self._validate_channel_connection, "interval", seconds=5, max_instances=1)
+        else:
+            if not getenv("WERKZEUG_RUN_MAIN"):
+                self._validate_channel_connection()
 
-        self.scheduler.start()
-        self._validate_channel_connection()
-        self.scheduler.add_job(self._validate_channel_connection, "interval", seconds=5, max_instances=1)
 
 
     def check_health(self, check_consumers=True):
@@ -114,6 +118,9 @@ class RabbitMQ:
                 self.channel = self.get_connection().channel()
                 self.last_message_consumed_at = 0
             except BaseException as ex:
+                if int(getenv("AMQP_STORM_APSCHEDULER", 1)) == 0:
+                    sleep(1)
+                    self._validate_channel_connection()
                 self.logger.error(
                     f"An error occurred while renewing rabbit connection: {str(ex)}"
                 )
@@ -251,12 +258,27 @@ class RabbitMQ:
                         self.logger.info(f"Start consuming queue {queue}")
                         self.channel.start_consuming()
                     except BaseException as ex:
-                        self.logger.error(
-                            f"An error occurred while consuming queue {queue}: {str(ex)}, apscheduler will try to restart it every 5 seconds"
-                        )
+                        if int(getenv("AMQP_STORM_APSCHEDULER", 1)) == 1:
+                            self.logger.error(
+                                f"An error occurred while consuming queue {queue}: {str(ex)}, apscheduler will try to restart it every 5 seconds"
+                            )
+                        else:
+                            self.logger.error(
+                                f"An error occurred while consuming queue {queue}: {str(ex)}, restarting consumer"
+                            )
+                            sleep(1)
+                            new_consumer()
 
-                self.scheduler.add_job(new_consumer, "interval", seconds=5, max_instances=1, name=f"amqp_consumer_job_{f.__name__}")
-
+                if int(getenv("AMQP_STORM_APSCHEDULER", 1)) == 1:
+                    self.scheduler.add_job(new_consumer, "interval", seconds=5, max_instances=1, name=f"amqp_consumer_job_{f.__name__}")
+                else:
+                    # Only run the consumer thread in the flask thread that gets reloaded during flask development mode.
+                    # Use FORCE_AMQP_STORM_CONSUMER_THREAD=1 if not running in flask development mode, but not recommended,
+                    # you should use AMQP_STORM_APSCHEDULER=1 instead.
+                    if getenv("WERKZEUG_RUN_MAIN", None) or int(getenv("FORCE_AMQP_STORM_CONSUMER_THREAD", 0)) == 1:
+                        thread = threading.Thread(target=new_consumer)
+                        thread.daemon = True
+                        thread.start()
             return f
 
         return decorator

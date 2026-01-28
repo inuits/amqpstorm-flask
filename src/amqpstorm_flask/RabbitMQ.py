@@ -73,6 +73,9 @@ class RabbitMQ:
         self.body_parser = body_parser
         self.msg_parser = msg_parser
         self.json_encoder = json_encoder
+        self.start()
+
+    def start(self):
         if int(getenv("AMQP_STORM_APSCHEDULER", 1))== 1:
             if int(getenv("FILTER_LOGS", 1)) == 1:
                 # some logs are useless, but we don't want to fully block a log level
@@ -95,8 +98,6 @@ class RabbitMQ:
         else:
             if not getenv("WERKZEUG_RUN_MAIN"):
                 self._validate_channel_connection()
-
-
 
     def check_health(self, check_consumers=True):
         if not self.get_connection().is_open:

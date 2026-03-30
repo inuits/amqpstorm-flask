@@ -1,6 +1,5 @@
 import json
 import logging
-import sys
 import threading
 from os import getenv
 
@@ -55,6 +54,7 @@ class RabbitMQ:
         self.development = development if development is not None else False
         self.last_message_consumed_at = 0
         self.scheduler = BackgroundScheduler()
+        self._reconnect_lock = threading.Lock()
 
     def init_app(
             self,
@@ -109,22 +109,43 @@ class RabbitMQ:
     def get_connection(self):
         return self.connection
 
+    def _close_connection(self):
+        """Safely close the existing connection and channel."""
+        try:
+            if self.connection and not self.connection.is_closed:
+                self.connection.close()
+        except Exception:
+            pass
+        self.connection = None
+        self.channel = None
+
     def _validate_channel_connection(self):
-        max_consumer_idle_time = int(getenv("MQ_MAX_CONSUMER_IDLE_TIME", 300))
-        consumed_seconds_ago = (time() - self.last_message_consumed_at)
-        if (not self.connection or self.get_connection().is_closed or self.channel.is_closed or
-                self.last_message_consumed_at == -1 or (self.last_message_consumed_at != 0 and (consumed_seconds_ago > max_consumer_idle_time))):
-            try:
-                self.connection = UriConnection(self.mq_url)
-                self.channel = self.get_connection().channel()
-                self.last_message_consumed_at = 0
-            except BaseException as ex:
-                if int(getenv("AMQP_STORM_APSCHEDULER", 1)) == 0:
-                    sleep(1)
-                    self._validate_channel_connection()
-                self.logger.error(
-                    f"An error occurred while renewing rabbit connection: {str(ex)}"
-                )
+        if not self._reconnect_lock.acquire(blocking=False):
+            return
+        try:
+            max_consumer_idle_time = int(getenv("MQ_MAX_CONSUMER_IDLE_TIME", 300))
+            consumed_seconds_ago = (time() - self.last_message_consumed_at)
+            needs_reconnect = (
+                not self.connection
+                or self.connection.is_closed
+                or self.channel is None
+                or self.channel.is_closed
+                or self.last_message_consumed_at == -1
+                or (self.last_message_consumed_at != 0
+                    and consumed_seconds_ago > max_consumer_idle_time)
+            )
+            if needs_reconnect:
+                try:
+                    self._close_connection()
+                    self.connection = UriConnection(self.mq_url)
+                    self.channel = self.connection.channel()
+                    self.last_message_consumed_at = 0
+                except Exception as ex:
+                    self.logger.error(
+                        f"An error occurred while renewing rabbit connection: {str(ex)}"
+                    )
+        finally:
+            self._reconnect_lock.release()
 
     def send(
             self,
@@ -226,49 +247,54 @@ class RabbitMQ:
             if enabled_queues is None or queue in enabled_queues:
                 @wraps(f)
                 def new_consumer():
-                    try:
-                        self._validate_channel_connection()
-                        self.channel.exchange.declare(
-                            exchange=exchange_name if exchange_name else self.mq_exchange,
-                            exchange_type=exchange_type,
-                            durable=self.exchange_params.durable,
-                            passive=self.exchange_params.passive,
-                            auto_delete=self.exchange_params.auto_delete,
-                        )
-                        self.channel.queue.declare(
-                            queue=queue,
-                            durable=self.queue_params.durable,
-                            passive=self.queue_params.passive if passive_queue is None else passive_queue,
-                            auto_delete=self.queue_params.auto_delete,
-                            arguments=queue_arguments,
-                        )
-                        self.channel.basic.qos(prefetch_count=prefetch_count)
-                        cb_function = f if full_message_object else self.__create_wrapper_function(routing_key, f)
-                        self.channel.basic.consume(
-                            cb_function, queue=queue,
-                            no_ack=self.queue_params.no_ack if auto_ack is None else auto_ack
-                        )
-
-                        keys = [routing_key] if isinstance(routing_key, str) else routing_key
-                        for key in keys:
-                            self.channel.queue.bind(
-                                queue=queue,
+                    backoff = 1
+                    max_backoff = 60
+                    while True:
+                        try:
+                            self._validate_channel_connection()
+                            self.channel.exchange.declare(
                                 exchange=exchange_name if exchange_name else self.mq_exchange,
-                                routing_key=key,
+                                exchange_type=exchange_type,
+                                durable=self.exchange_params.durable,
+                                passive=self.exchange_params.passive,
+                                auto_delete=self.exchange_params.auto_delete,
                             )
-                        self.logger.info(f"Start consuming queue {queue}")
-                        self.channel.start_consuming()
-                    except BaseException as ex:
-                        if int(getenv("AMQP_STORM_APSCHEDULER", 1)) == 1:
-                            self.logger.error(
-                                f"An error occurred while consuming queue {queue}: {str(ex)}, apscheduler will try to restart it every 5 seconds"
+                            self.channel.queue.declare(
+                                queue=queue,
+                                durable=self.queue_params.durable,
+                                passive=self.queue_params.passive if passive_queue is None else passive_queue,
+                                auto_delete=self.queue_params.auto_delete,
+                                arguments=queue_arguments,
                             )
-                        else:
-                            self.logger.error(
-                                f"An error occurred while consuming queue {queue}: {str(ex)}, restarting consumer"
+                            self.channel.basic.qos(prefetch_count=prefetch_count)
+                            cb_function = f if full_message_object else self.__create_wrapper_function(routing_key, f)
+                            self.channel.basic.consume(
+                                cb_function, queue=queue,
+                                no_ack=self.queue_params.no_ack if auto_ack is None else auto_ack
                             )
-                            sleep(1)
-                            new_consumer()
+
+                            keys = [routing_key] if isinstance(routing_key, str) else routing_key
+                            for key in keys:
+                                self.channel.queue.bind(
+                                    queue=queue,
+                                    exchange=exchange_name if exchange_name else self.mq_exchange,
+                                    routing_key=key,
+                                )
+                            self.logger.info(f"Start consuming queue {queue}")
+                            backoff = 1
+                            self.channel.start_consuming()
+                        except Exception as ex:
+                            if int(getenv("AMQP_STORM_APSCHEDULER", 1)) == 1:
+                                self.logger.error(
+                                    f"An error occurred while consuming queue {queue}: {str(ex)}, apscheduler will try to restart it every 5 seconds"
+                                )
+                                return
+                            else:
+                                self.logger.error(
+                                    f"An error occurred while consuming queue {queue}: {str(ex)}, restarting consumer in {backoff}s"
+                                )
+                                sleep(backoff)
+                                backoff = min(backoff * 2, max_backoff)
 
                 if int(getenv("AMQP_STORM_APSCHEDULER", 1)) == 1:
                     self.scheduler.add_job(new_consumer, "interval", seconds=5, max_instances=1, name=f"amqp_consumer_job_{f.__name__}")
@@ -286,3 +312,4 @@ class RabbitMQ:
 
     def stop(self):
         self.scheduler.shutdown()
+        self._close_connection()

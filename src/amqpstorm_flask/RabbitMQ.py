@@ -13,7 +13,6 @@ from hashlib import sha256
 from retry.api import retry_call
 from time import sleep, time
 from typing import Union, List
-from warnings import filterwarnings
 from apscheduler.schedulers.background import BackgroundScheduler
 
 
@@ -56,7 +55,9 @@ class RabbitMQ:
         self.scheduler = BackgroundScheduler()
         self._reconnect_lock = threading.Lock()
         self._publish_lock = threading.Lock()
+        self._consumer_channels_lock = threading.Lock()
         self._consumer_channels = []
+        self._exchange_declared = set()
 
     def init_app(
             self,
@@ -105,8 +106,12 @@ class RabbitMQ:
         if not self.connection or not self.connection.is_open:
             return False, "Connection not open"
         if check_consumers:
-            active = [ch for ch in self._consumer_channels
-                      if ch and not ch.is_closed and ch.consumer_tags]
+            with self._consumer_channels_lock:
+                self._consumer_channels = [
+                    ch for ch in self._consumer_channels
+                    if ch and not ch.is_closed
+                ]
+                active = [ch for ch in self._consumer_channels if ch.consumer_tags]
             if not active:
                 return False, "No consumers available"
         return True, "Connection open"
@@ -116,13 +121,14 @@ class RabbitMQ:
 
     def _close_connection(self):
         """Safely close the existing connection and all channels."""
-        for ch in self._consumer_channels:
-            try:
-                if ch and not ch.is_closed:
-                    ch.close()
-            except Exception:
-                pass
-        self._consumer_channels.clear()
+        with self._consumer_channels_lock:
+            for ch in self._consumer_channels:
+                try:
+                    if ch and not ch.is_closed:
+                        ch.close()
+                except Exception:
+                    pass
+            self._consumer_channels.clear()
         try:
             if self.channel and not self.channel.is_closed:
                 self.channel.close()
@@ -135,6 +141,7 @@ class RabbitMQ:
         except Exception:
             pass
         self.connection = None
+        self._exchange_declared.clear()
 
     def _validate_channel_connection(self):
         if not self._reconnect_lock.acquire(blocking=False):
@@ -169,6 +176,18 @@ class RabbitMQ:
         finally:
             self._reconnect_lock.release()
 
+    def _declare_exchange(self, channel, exchange, exchange_type):
+        """Declare exchange on channel, skipping if already declared on this connection."""
+        if exchange not in self._exchange_declared:
+            channel.exchange.declare(
+                exchange=exchange,
+                exchange_type=exchange_type,
+                passive=self.exchange_params.passive,
+                durable=self.exchange_params.durable,
+                auto_delete=self.exchange_params.auto_delete,
+            )
+            self._exchange_declared.add(exchange)
+
     def send(
             self,
             body,
@@ -180,21 +199,14 @@ class RabbitMQ:
             exchange_name: str = None,
             **properties,
     ):
-        filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
         exchange_name = self.mq_exchange if exchange_name is None else exchange_name
         exchange = (
             f"{exchange_name}-development" if self.development else exchange_name
         )
+        resolved_exchange = f"{exchange}-debug" if debug_exchange else exchange
         with self._publish_lock:
             self._validate_channel_connection()
-            self.channel.exchange.declare(
-                exchange=f"{exchange}-debug" if debug_exchange else exchange,
-                exchange_type=exchange_type,
-                passive=self.exchange_params.passive,
-                durable=self.exchange_params.durable,
-                auto_delete=self.exchange_params.auto_delete,
-            )
-
+            self._declare_exchange(self.channel, resolved_exchange, exchange_type)
             retry_call(
                 self._publish_to_channel,
                 (body, routing_key, message_version, debug_exchange, exchange_name),
@@ -223,7 +235,6 @@ class RabbitMQ:
         if "headers" not in properties:
             properties["headers"] = {}
         properties["headers"]["x-message-version"] = message_version
-        filterwarnings(action="ignore", message="unclosed", category=ResourceWarning)
         self._validate_channel_connection()
         self.channel.basic.publish(
             exchange=f"{exchange_name}-debug" if debug_exchange is True else exchange_name,
@@ -271,7 +282,7 @@ class RabbitMQ:
                 @wraps(f)
                 def new_consumer():
                     backoff = 1
-                    max_backoff = 60
+                    max_backoff = int(getenv("MQ_MAX_CONSUMER_BACKOFF", 60))
                     while True:
                         consumer_channel = None
                         try:
@@ -279,7 +290,8 @@ class RabbitMQ:
                             if not self.connection or self.connection.is_closed:
                                 raise AMQPConnectionError("No connection available")
                             consumer_channel = self.connection.channel()
-                            self._consumer_channels.append(consumer_channel)
+                            with self._consumer_channels_lock:
+                                self._consumer_channels.append(consumer_channel)
                             consumer_channel.exchange.declare(
                                 exchange=exchange_name if exchange_name else self.mq_exchange,
                                 exchange_type=exchange_type,
@@ -312,8 +324,9 @@ class RabbitMQ:
                             backoff = 1
                             consumer_channel.start_consuming()
                         except Exception as ex:
-                            if consumer_channel in self._consumer_channels:
-                                self._consumer_channels.remove(consumer_channel)
+                            with self._consumer_channels_lock:
+                                if consumer_channel in self._consumer_channels:
+                                    self._consumer_channels.remove(consumer_channel)
                             if int(getenv("AMQP_STORM_APSCHEDULER", 1)) == 1:
                                 self.logger.error(
                                     f"An error occurred while consuming queue {queue}: {str(ex)}, apscheduler will try to restart it every 5 seconds"
@@ -342,4 +355,11 @@ class RabbitMQ:
 
     def stop(self):
         self.scheduler.shutdown()
+        with self._consumer_channels_lock:
+            for ch in self._consumer_channels:
+                try:
+                    if ch and not ch.is_closed:
+                        ch.stop_consuming()
+                except Exception:
+                    pass
         self._close_connection()

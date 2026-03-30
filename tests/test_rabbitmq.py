@@ -16,7 +16,9 @@ def _make_rabbit():
         rabbit.last_message_consumed_at = 0
         rabbit._reconnect_lock = threading.Lock()
         rabbit._publish_lock = threading.Lock()
+        rabbit._consumer_channels_lock = threading.Lock()
         rabbit._consumer_channels = []
+        rabbit._exchange_declared = set()
         rabbit.scheduler = MagicMock()
         rabbit.exchange_params = MagicMock()
         rabbit.queue_params = MagicMock()
@@ -233,7 +235,9 @@ class TestPerConsumerChannels(TestCase):
         rabbit.last_message_consumed_at = 0
         rabbit._reconnect_lock = threading.Lock()
         rabbit._publish_lock = threading.Lock()
+        rabbit._consumer_channels_lock = threading.Lock()
         rabbit._consumer_channels = []
+        rabbit._exchange_declared = set()
         rabbit.scheduler = MagicMock()
         rabbit.exchange_params = MagicMock()
         rabbit.queue_params = MagicMock()
@@ -312,7 +316,9 @@ class TestNewConsumerNoRecursion(TestCase):
         rabbit.last_message_consumed_at = 0
         rabbit._reconnect_lock = threading.Lock()
         rabbit._publish_lock = threading.Lock()
+        rabbit._consumer_channels_lock = threading.Lock()
         rabbit._consumer_channels = []
+        rabbit._exchange_declared = set()
         rabbit.scheduler = MagicMock()
         rabbit.exchange_params = MagicMock()
         rabbit.queue_params = MagicMock()
@@ -404,8 +410,53 @@ class TestSendThreadSafety(TestCase):
         self.assertEqual(rabbit.channel, publish_channel)
 
 
+class TestExchangeCache(TestCase):
+    @patch("amqpstorm_flask.RabbitMQ.UriConnection")
+    def test_exchange_declared_once_per_connection(self, mock_uri_conn):
+        rabbit = _make_rabbit()
+        conn = _make_mock_connection()
+        mock_uri_conn.return_value = conn
+        rabbit.connection = conn
+        rabbit.channel = conn.channel.return_value
+        rabbit.json_encoder = None
+        rabbit.development = False
+
+        rabbit.send({"msg": 1}, routing_key="test.route")
+        rabbit.send({"msg": 2}, routing_key="test.route")
+
+        # exchange.declare called only once despite two sends
+        self.assertEqual(rabbit.channel.exchange.declare.call_count, 1)
+
+    @patch("amqpstorm_flask.RabbitMQ.UriConnection")
+    def test_exchange_cache_cleared_on_reconnect(self, mock_uri_conn):
+        rabbit = _make_rabbit()
+        rabbit._exchange_declared.add("test-exchange")
+
+        conn = _make_mock_connection()
+        mock_uri_conn.return_value = conn
+
+        rabbit._close_connection()
+
+        self.assertEqual(rabbit._exchange_declared, set())
+
+
+class TestHealthCheckCleanup(TestCase):
+    def test_health_check_removes_dead_channels(self):
+        rabbit = _make_rabbit()
+        rabbit.connection = _make_mock_connection()
+        dead_ch = MagicMock(is_closed=True, consumer_tags=["old"])
+        alive_ch = MagicMock(is_closed=False, consumer_tags=["active"])
+        rabbit._consumer_channels = [dead_ch, alive_ch]
+
+        ok, msg = rabbit.check_health(check_consumers=True)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(rabbit._consumer_channels), 1)
+        self.assertIs(rabbit._consumer_channels[0], alive_ch)
+
+
 class TestStop(TestCase):
-    def test_stop_closes_connection_and_channels(self):
+    def test_stop_stops_consuming_then_closes(self):
         rabbit = _make_rabbit()
         conn = MagicMock(is_closed=False)
         rabbit.connection = conn
@@ -416,11 +467,24 @@ class TestStop(TestCase):
         rabbit.stop()
 
         rabbit.scheduler.shutdown.assert_called_once()
+        ch1.stop_consuming.assert_called_once()
         conn.close.assert_called_once()
-        ch1.close.assert_called_once()
         self.assertIsNone(rabbit.connection)
         self.assertIsNone(rabbit.channel)
         self.assertEqual(rabbit._consumer_channels, [])
+
+    def test_stop_handles_stop_consuming_error(self):
+        rabbit = _make_rabbit()
+        rabbit.connection = MagicMock(is_closed=False)
+        rabbit.channel = MagicMock(is_closed=False)
+        ch1 = MagicMock(is_closed=False)
+        ch1.stop_consuming.side_effect = Exception("not consuming")
+        rabbit._consumer_channels = [ch1]
+
+        rabbit.stop()
+
+        rabbit.scheduler.shutdown.assert_called_once()
+        self.assertIsNone(rabbit.connection)
 
     def test_stop_with_no_connection(self):
         rabbit = _make_rabbit()

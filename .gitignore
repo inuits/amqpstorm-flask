@@ -3,4 +3,4 @@ env/
 venv/
 build/
 src/amqpstorm_flask.egg-info
-.venv/
+.venv/__pycache__/

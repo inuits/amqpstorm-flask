@@ -55,6 +55,8 @@ class RabbitMQ:
         self.last_message_consumed_at = 0
         self.scheduler = BackgroundScheduler()
         self._reconnect_lock = threading.Lock()
+        self._publish_lock = threading.Lock()
+        self._consumer_channels = []
 
     def init_app(
             self,
@@ -100,24 +102,39 @@ class RabbitMQ:
                 self._validate_channel_connection()
 
     def check_health(self, check_consumers=True):
-        if not self.get_connection().is_open:
+        if not self.connection or not self.connection.is_open:
             return False, "Connection not open"
-        if check_consumers and len(self.channel.consumer_tags) < 1:
-            return False, "No consumers available"
+        if check_consumers:
+            active = [ch for ch in self._consumer_channels
+                      if ch and not ch.is_closed and ch.consumer_tags]
+            if not active:
+                return False, "No consumers available"
         return True, "Connection open"
 
     def get_connection(self):
         return self.connection
 
     def _close_connection(self):
-        """Safely close the existing connection and channel."""
+        """Safely close the existing connection and all channels."""
+        for ch in self._consumer_channels:
+            try:
+                if ch and not ch.is_closed:
+                    ch.close()
+            except Exception:
+                pass
+        self._consumer_channels.clear()
+        try:
+            if self.channel and not self.channel.is_closed:
+                self.channel.close()
+        except Exception:
+            pass
+        self.channel = None
         try:
             if self.connection and not self.connection.is_closed:
                 self.connection.close()
         except Exception:
             pass
         self.connection = None
-        self.channel = None
 
     def _validate_channel_connection(self):
         if not self._reconnect_lock.acquire(blocking=False):
@@ -128,8 +145,6 @@ class RabbitMQ:
             needs_reconnect = (
                 not self.connection
                 or self.connection.is_closed
-                or self.channel is None
-                or self.channel.is_closed
                 or self.last_message_consumed_at == -1
                 or (self.last_message_consumed_at != 0
                     and consumed_seconds_ago > max_consumer_idle_time)
@@ -143,6 +158,13 @@ class RabbitMQ:
                 except Exception as ex:
                     self.logger.error(
                         f"An error occurred while renewing rabbit connection: {str(ex)}"
+                    )
+            elif self.channel is None or self.channel.is_closed:
+                try:
+                    self.channel = self.connection.channel()
+                except Exception as ex:
+                    self.logger.error(
+                        f"An error occurred while renewing rabbit channel: {str(ex)}"
                     )
         finally:
             self._reconnect_lock.release()
@@ -163,24 +185,25 @@ class RabbitMQ:
         exchange = (
             f"{exchange_name}-development" if self.development else exchange_name
         )
-        self._validate_channel_connection()
-        self.channel.exchange.declare(
-            exchange=f"{exchange}-debug" if debug_exchange else exchange,
-            exchange_type=exchange_type,
-            passive=self.exchange_params.passive,
-            durable=self.exchange_params.durable,
-            auto_delete=self.exchange_params.auto_delete,
-        )
+        with self._publish_lock:
+            self._validate_channel_connection()
+            self.channel.exchange.declare(
+                exchange=f"{exchange}-debug" if debug_exchange else exchange,
+                exchange_type=exchange_type,
+                passive=self.exchange_params.passive,
+                durable=self.exchange_params.durable,
+                auto_delete=self.exchange_params.auto_delete,
+            )
 
-        retry_call(
-            self._publish_to_channel,
-            (body, routing_key, message_version, debug_exchange, exchange_name),
-            properties,
-            exceptions=(AMQPConnectionError, AssertionError),
-            tries=retries,
-            delay=5,
-            jitter=(5, 15),
-        )
+            retry_call(
+                self._publish_to_channel,
+                (body, routing_key, message_version, debug_exchange, exchange_name),
+                properties,
+                exceptions=(AMQPConnectionError, AssertionError),
+                tries=retries,
+                delay=5,
+                jitter=(5, 15),
+            )
 
     def _publish_to_channel(
             self,
@@ -250,40 +273,47 @@ class RabbitMQ:
                     backoff = 1
                     max_backoff = 60
                     while True:
+                        consumer_channel = None
                         try:
                             self._validate_channel_connection()
-                            self.channel.exchange.declare(
+                            if not self.connection or self.connection.is_closed:
+                                raise AMQPConnectionError("No connection available")
+                            consumer_channel = self.connection.channel()
+                            self._consumer_channels.append(consumer_channel)
+                            consumer_channel.exchange.declare(
                                 exchange=exchange_name if exchange_name else self.mq_exchange,
                                 exchange_type=exchange_type,
                                 durable=self.exchange_params.durable,
                                 passive=self.exchange_params.passive,
                                 auto_delete=self.exchange_params.auto_delete,
                             )
-                            self.channel.queue.declare(
+                            consumer_channel.queue.declare(
                                 queue=queue,
                                 durable=self.queue_params.durable,
                                 passive=self.queue_params.passive if passive_queue is None else passive_queue,
                                 auto_delete=self.queue_params.auto_delete,
                                 arguments=queue_arguments,
                             )
-                            self.channel.basic.qos(prefetch_count=prefetch_count)
+                            consumer_channel.basic.qos(prefetch_count=prefetch_count)
                             cb_function = f if full_message_object else self.__create_wrapper_function(routing_key, f)
-                            self.channel.basic.consume(
+                            consumer_channel.basic.consume(
                                 cb_function, queue=queue,
                                 no_ack=self.queue_params.no_ack if auto_ack is None else auto_ack
                             )
 
                             keys = [routing_key] if isinstance(routing_key, str) else routing_key
                             for key in keys:
-                                self.channel.queue.bind(
+                                consumer_channel.queue.bind(
                                     queue=queue,
                                     exchange=exchange_name if exchange_name else self.mq_exchange,
                                     routing_key=key,
                                 )
                             self.logger.info(f"Start consuming queue {queue}")
                             backoff = 1
-                            self.channel.start_consuming()
+                            consumer_channel.start_consuming()
                         except Exception as ex:
+                            if consumer_channel in self._consumer_channels:
+                                self._consumer_channels.remove(consumer_channel)
                             if int(getenv("AMQP_STORM_APSCHEDULER", 1)) == 1:
                                 self.logger.error(
                                     f"An error occurred while consuming queue {queue}: {str(ex)}, apscheduler will try to restart it every 5 seconds"

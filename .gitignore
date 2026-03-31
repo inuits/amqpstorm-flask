@@ -1,6 +1,6 @@
 env/
 .idea/
 venv/
-tests/
 build/
 src/amqpstorm_flask.egg-info
+.venv/__pycache__/

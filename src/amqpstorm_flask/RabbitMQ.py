@@ -205,11 +205,9 @@ class RabbitMQ:
         )
         resolved_exchange = f"{exchange}-debug" if debug_exchange else exchange
         with self._publish_lock:
-            self._validate_channel_connection()
-            self._declare_exchange(self.channel, resolved_exchange, exchange_type)
             retry_call(
                 self._publish_to_channel,
-                (body, routing_key, message_version, debug_exchange, exchange_name),
+                (body, routing_key, message_version, resolved_exchange, exchange_type),
                 properties,
                 exceptions=(AMQPConnectionError, AssertionError),
                 tries=retries,
@@ -222,8 +220,8 @@ class RabbitMQ:
             body,
             routing_key: str,
             message_version: str,
-            debug_exchange: bool = False,
-            exchange_name: str = None,
+            resolved_exchange: str,
+            exchange_type: str = "topic",
             **properties,
     ):
         encoded_body = json.dumps(body, cls=self.json_encoder).encode("utf-8")
@@ -236,8 +234,14 @@ class RabbitMQ:
             properties["headers"] = {}
         properties["headers"]["x-message-version"] = message_version
         self._validate_channel_connection()
+        # A downed broker leaves self.channel as None; raise a retryable error
+        # instead of dereferencing None (which surfaced as AttributeError and
+        # skipped retry_call entirely).
+        if self.channel is None:
+            raise AMQPConnectionError("No channel available to publish to")
+        self._declare_exchange(self.channel, resolved_exchange, exchange_type)
         self.channel.basic.publish(
-            exchange=f"{exchange_name}-debug" if debug_exchange is True else exchange_name,
+            exchange=resolved_exchange,
             routing_key=routing_key,
             body=encoded_body,
             properties=properties,

@@ -493,3 +493,109 @@ class TestStop(TestCase):
 
         rabbit.scheduler.shutdown.assert_called_once()
         self.assertIsNone(rabbit.connection)
+
+
+class TestPublisherConfirms(TestCase):
+    """Publishes must be confirmed by the broker: an unconfirmed publish on a
+    dying connection is otherwise silently lost (fire-and-forget)."""
+
+    @patch("amqpstorm_flask.RabbitMQ.UriConnection")
+    def test_new_connection_enables_confirm_mode(self, mock_uri_conn):
+        rabbit = _make_rabbit()
+        conn = _make_mock_connection()
+        mock_uri_conn.return_value = conn
+
+        rabbit._validate_channel_connection()
+
+        conn.channel.return_value.confirm_deliveries.assert_called_once()
+
+    @patch("amqpstorm_flask.RabbitMQ.UriConnection")
+    def test_recreated_publish_channel_enables_confirm_mode(self, mock_uri_conn):
+        rabbit = _make_rabbit()
+        conn = _make_mock_connection()
+        rabbit.connection = conn
+        rabbit.channel = None  # dead publish channel on a live connection
+
+        rabbit._validate_channel_connection()
+
+        conn.channel.return_value.confirm_deliveries.assert_called_once()
+
+    def test_publish_raises_when_broker_does_not_confirm(self):
+        rabbit = _make_rabbit()
+        conn = _make_mock_connection()
+        rabbit.connection = conn
+        rabbit.json_encoder = None
+        channel = conn.channel.return_value
+        channel.basic.publish.return_value = False
+        rabbit.channel = channel
+
+        with self.assertRaises(AssertionError):
+            rabbit._publish_to_channel({"k": "v"}, "rk", "v1.0.0", "test-exchange")
+
+    @patch("retry.api.time.sleep")
+    def test_send_retries_until_publish_confirmed(self, _mock_sleep):
+        rabbit = _make_rabbit()
+        conn = _make_mock_connection()
+        rabbit.connection = conn
+        rabbit.json_encoder = None
+        rabbit.development = False
+        channel = conn.channel.return_value
+        channel.basic.publish.side_effect = [False, True]
+        rabbit.channel = channel
+
+        rabbit.send({"k": "v"}, routing_key="rk")
+
+        self.assertEqual(channel.basic.publish.call_count, 2)
+
+    @patch("retry.api.time.sleep")
+    def test_send_retries_on_channel_error(self, _mock_sleep):
+        from amqpstorm import AMQPChannelError
+
+        rabbit = _make_rabbit()
+        conn = _make_mock_connection()
+        rabbit.connection = conn
+        rabbit.json_encoder = None
+        rabbit.development = False
+        channel = conn.channel.return_value
+        channel.basic.publish.side_effect = [AMQPChannelError("channel closed"), True]
+        rabbit.channel = channel
+
+        rabbit.send({"k": "v"}, routing_key="rk")
+
+        self.assertEqual(channel.basic.publish.call_count, 2)
+
+
+class TestScheduledValidationLocking(TestCase):
+    """The periodic reconnect job must never tear down a connection that a
+    publish is currently using: it has to wait for the publish lock."""
+
+    def test_locked_validation_waits_for_publish_lock(self):
+        rabbit = _make_rabbit()
+        conn = _make_mock_connection()
+        rabbit.connection = conn
+        rabbit.channel = conn.channel.return_value
+        done = threading.Event()
+
+        def run():
+            rabbit._locked_channel_validation()
+            done.set()
+
+        rabbit._publish_lock.acquire()
+        try:
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            self.assertFalse(done.wait(0.3))
+        finally:
+            rabbit._publish_lock.release()
+        self.assertTrue(done.wait(2))
+
+    @patch("amqpstorm_flask.RabbitMQ.UriConnection")
+    def test_start_schedules_locked_validation(self, mock_uri_conn):
+        rabbit = _make_rabbit()
+        mock_uri_conn.return_value = _make_mock_connection()
+
+        with patch.dict("os.environ", {"AMQP_STORM_APSCHEDULER": "1"}):
+            rabbit.start()
+
+        scheduled = [c.args[0] for c in rabbit.scheduler.add_job.call_args_list]
+        self.assertIn(rabbit._locked_channel_validation, scheduled)

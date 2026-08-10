@@ -8,6 +8,7 @@ A Flask extension for [AMQPStorm](https://github.com/eandersson/amqpstorm) that 
 - **Easy Publishing**: Simple method to send JSON messages with retry logic.
 - **Decorator-based Consumers**: Define message consumers using simple decorators.
 - **Health Checks**: Built-in health check functionality.
+- **Prometheus Metrics**: Message processing durations per queue, see [Metrics](#metrics).
 - **Configuration**: Configure via Flask app config or environment variables.
 
 ## Installation
@@ -122,4 +123,33 @@ The `@mq.queue` decorator supports several parameters:
 - `prefetch_count`: Number of messages to prefetch (default `1`).
 - `queue_arguments`: Dictionary of arguments for queue declaration (default `{"x-queue-type": "quorum"}`).
 - `full_message_object`: If `True`, the decorated function receives the message object instead of unpacked values.
+
+## Metrics
+
+Every consumer is instrumented with three prometheus histograms, labeled with `env`, `service_name` and `queue`:
+
+| Metric | Measures |
+|--------|----------|
+| `message_processing_active_duration_seconds` | Time spent inside the consumer callback |
+| `message_processing_waiting_duration_seconds` | Publication until the start of processing |
+| `message_processing_total_duration_seconds` | Publication until the message is acknowledged |
+
+The three are independent observations. `total` is only observed once the message reaches a terminal
+state: an `ack`, or a `nack`/`reject` with `requeue=False`. A `nack` that requeues produces no `total`,
+because the message will be delivered again, and the eventual `ack` of that delivery reports the total
+from its own publication time. Consumers using `auto_ack` never settle the message themselves, so for
+them the end of the callback counts as terminal.
+
+`waiting` and `total` need the publication time. `send()` stamps it as an `x-published-at` header
+(epoch seconds, float); messages without it fall back to the AMQP `timestamp` property, which only has
+one second resolution. Messages with neither get no `waiting` or `total` observation.
+
+| Environment Variable | Default | Description |
+|----------------------|---------|-------------|
+| `AMQP_METRICS_ENABLED` | `1` | Set to `0` to skip consumer instrumentation entirely |
+| `MESSAGE_PROCESSING_ACTIVE_DURATION_BUCKETS` | `.005` … `10` | Comma-separated bucket bounds |
+| `MESSAGE_PROCESSING_WAITING_DURATION_BUCKETS` | `.01` … `600` | Comma-separated bucket bounds |
+| `MESSAGE_PROCESSING_TOTAL_DURATION_BUCKETS` | `.01` … `600` | Comma-separated bucket bounds |
+
+`NOMAD_JOB_NAME` and `NOMAD_GROUP_NAME` provide the `env` and `service_name` label values.
 

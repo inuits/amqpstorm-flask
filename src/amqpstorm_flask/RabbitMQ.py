@@ -4,6 +4,7 @@ import threading
 from os import getenv
 
 from .exchange_params import ExchangeParams
+from .metrics import PUBLISHED_AT_HEADER, instrument_consumer
 from .queue_params import QueueParams
 
 from amqpstorm import UriConnection, AMQPConnectionError
@@ -233,6 +234,9 @@ class RabbitMQ:
         if "headers" not in properties:
             properties["headers"] = {}
         properties["headers"]["x-message-version"] = message_version
+        # Publication time for the consumer side message_processing_* metrics.
+        # setdefault keeps the original time when retry_call republishes.
+        properties["headers"].setdefault(PUBLISHED_AT_HEADER, time())
         self._validate_channel_connection()
         # A downed broker leaves self.channel as None; raise a retryable error
         # instead of dereferencing None (which surfaced as AttributeError and
@@ -311,10 +315,12 @@ class RabbitMQ:
                                 arguments=queue_arguments,
                             )
                             consumer_channel.basic.qos(prefetch_count=prefetch_count)
+                            no_ack = self.queue_params.no_ack if auto_ack is None else auto_ack
                             cb_function = f if full_message_object else self.__create_wrapper_function(routing_key, f)
                             consumer_channel.basic.consume(
-                                cb_function, queue=queue,
-                                no_ack=self.queue_params.no_ack if auto_ack is None else auto_ack
+                                instrument_consumer(cb_function, queue=queue, auto_ack=no_ack),
+                                queue=queue,
+                                no_ack=no_ack
                             )
 
                             keys = [routing_key] if isinstance(routing_key, str) else routing_key

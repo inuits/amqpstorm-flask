@@ -410,6 +410,43 @@ class TestSendThreadSafety(TestCase):
         self.assertEqual(rabbit.channel, publish_channel)
 
 
+class TestPublicationTimeHeader(TestCase):
+    @patch("amqpstorm_flask.RabbitMQ.UriConnection")
+    def test_send_stamps_publication_time(self, mock_uri_conn):
+        rabbit = _make_rabbit()
+        conn = _make_mock_connection()
+        mock_uri_conn.return_value = conn
+        rabbit.connection = conn
+        rabbit.channel = conn.channel.return_value
+        rabbit.json_encoder = None
+        rabbit.development = False
+
+        before = time.time()
+        rabbit.send({"test": "data"}, routing_key="test.route")
+
+        headers = rabbit.channel.basic.publish.call_args.kwargs["properties"]["headers"]
+        self.assertGreaterEqual(headers["x-published-at"], before)
+        self.assertLessEqual(headers["x-published-at"], time.time())
+
+    @patch("amqpstorm_flask.RabbitMQ.UriConnection")
+    def test_publication_time_survives_republish(self, mock_uri_conn):
+        rabbit = _make_rabbit()
+        conn = _make_mock_connection()
+        mock_uri_conn.return_value = conn
+        rabbit.connection = conn
+        rabbit.channel = conn.channel.return_value
+        rabbit.json_encoder = None
+        rabbit.development = False
+
+        properties = {"headers": {"x-published-at": 1700000000.0}}
+        rabbit._publish_to_channel(
+            {"test": "data"}, "test.route", "v1.0.0", "test-exchange", **properties
+        )
+
+        headers = rabbit.channel.basic.publish.call_args.kwargs["properties"]["headers"]
+        self.assertEqual(headers["x-published-at"], 1700000000.0)
+
+
 class TestExchangeCache(TestCase):
     @patch("amqpstorm_flask.RabbitMQ.UriConnection")
     def test_exchange_declared_once_per_connection(self, mock_uri_conn):

@@ -7,7 +7,7 @@ from .exchange_params import ExchangeParams
 from .metrics import PUBLISHED_AT_HEADER, instrument_consumer
 from .queue_params import QueueParams
 
-from amqpstorm import UriConnection, AMQPConnectionError
+from amqpstorm import UriConnection, AMQPChannelError, AMQPConnectionError
 from datetime import datetime
 from functools import wraps
 from hashlib import sha256
@@ -86,7 +86,11 @@ class RabbitMQ:
                 class LogFilterAPScheduler(logging.Filter):
                     def filter(self, record):
                         message = record.getMessage()
-                        return "amqp_consumer_job_" not in message and "_validate_channel_connection" not in message
+                        return (
+                            "amqp_consumer_job_" not in message
+                            and "_validate_channel_connection" not in message
+                            and "_locked_channel_validation" not in message
+                        )
                 logging.getLogger("apscheduler.scheduler").addFilter(LogFilterAPScheduler())
                 logging.getLogger("apscheduler.executors.default").addFilter(LogFilterAPScheduler())
                 class LogFilterAmqpStorm(logging.Filter):
@@ -98,7 +102,7 @@ class RabbitMQ:
                 logging.getLogger("amqpstorm.io").addFilter(LogFilterAmqpStorm())
             self.scheduler.start()
             self._validate_channel_connection()
-            self.scheduler.add_job(self._validate_channel_connection, "interval", seconds=5, max_instances=1)
+            self.scheduler.add_job(self._locked_channel_validation, "interval", seconds=5, max_instances=1)
         else:
             if not getenv("WERKZEUG_RUN_MAIN"):
                 self._validate_channel_connection()
@@ -144,6 +148,12 @@ class RabbitMQ:
         self.connection = None
         self._exchange_declared.clear()
 
+    def _locked_channel_validation(self):
+        """Validate the connection while holding the publish lock, so the
+        periodic reconnect never closes a connection a publish is using."""
+        with self._publish_lock:
+            self._validate_channel_connection()
+
     def _validate_channel_connection(self):
         if not self._reconnect_lock.acquire(blocking=False):
             return
@@ -159,10 +169,17 @@ class RabbitMQ:
             )
             if needs_reconnect:
                 try:
+                    reason = (
+                        "no connection" if not self.connection
+                        else "connection closed" if self.connection.is_closed
+                        else f"consumers idle for {int(consumed_seconds_ago)}s"
+                    )
                     self._close_connection()
                     self.connection = UriConnection(self.mq_url)
                     self.channel = self.connection.channel()
+                    self.channel.confirm_deliveries()
                     self.last_message_consumed_at = 0
+                    self.logger.info(f"Renewed rabbit connection ({reason})")
                 except Exception as ex:
                     self.logger.error(
                         f"An error occurred while renewing rabbit connection: {str(ex)}"
@@ -170,6 +187,7 @@ class RabbitMQ:
             elif self.channel is None or self.channel.is_closed:
                 try:
                     self.channel = self.connection.channel()
+                    self.channel.confirm_deliveries()
                 except Exception as ex:
                     self.logger.error(
                         f"An error occurred while renewing rabbit channel: {str(ex)}"
@@ -210,7 +228,7 @@ class RabbitMQ:
                 self._publish_to_channel,
                 (body, routing_key, message_version, resolved_exchange, exchange_type),
                 properties,
-                exceptions=(AMQPConnectionError, AssertionError),
+                exceptions=(AMQPConnectionError, AMQPChannelError, AssertionError),
                 tries=retries,
                 delay=5,
                 jitter=(5, 15),
@@ -244,12 +262,20 @@ class RabbitMQ:
         if self.channel is None:
             raise AMQPConnectionError("No channel available to publish to")
         self._declare_exchange(self.channel, resolved_exchange, exchange_type)
-        self.channel.basic.publish(
+        confirmed = self.channel.basic.publish(
             exchange=resolved_exchange,
             routing_key=routing_key,
             body=encoded_body,
             properties=properties,
         )
+        # In confirm mode publish returns a bool; False means the broker did
+        # not confirm the message, so raise a retryable error instead of
+        # silently losing it.
+        if confirmed is False:
+            raise AssertionError(
+                f"Publish of message with routing key {routing_key} "
+                "was not confirmed by the broker"
+            )
 
     @staticmethod
     def __create_wrapper_function(routing_key, f):
@@ -294,7 +320,7 @@ class RabbitMQ:
                     while True:
                         consumer_channel = None
                         try:
-                            self._validate_channel_connection()
+                            self._locked_channel_validation()
                             if not self.connection or self.connection.is_closed:
                                 raise AMQPConnectionError("No connection available")
                             consumer_channel = self.connection.channel()
